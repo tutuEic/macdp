@@ -11,6 +11,7 @@ import (
 	"github.com/tutuEic/macdp/internal/event"
 	"github.com/tutuEic/macdp/internal/git"
 	"github.com/tutuEic/macdp/internal/memory"
+	"github.com/tutuEic/macdp/internal/review"
 	"github.com/tutuEic/macdp/internal/store"
 )
 
@@ -23,12 +24,13 @@ type Scheduler struct {
 	bridge      *ContextBridge
 	memory      *memory.Manager
 	git         *git.Manager
+	reviewer    *review.Pipeline
 	maxParallel int
 	taskTimeout time.Duration
 }
 
 // NewScheduler creates a new scheduler.
-func NewScheduler(dag *DAG, agents *agent.Registry, bus *event.EventBus, db *store.DB, mem *memory.Manager, gitMgr *git.Manager) *Scheduler {
+func NewScheduler(dag *DAG, agents *agent.Registry, bus *event.EventBus, db *store.DB, mem *memory.Manager, gitMgr *git.Manager, reviewer *review.Pipeline) *Scheduler {
 	return &Scheduler{
 		dag:         dag,
 		agents:      agents,
@@ -37,6 +39,7 @@ func NewScheduler(dag *DAG, agents *agent.Registry, bus *event.EventBus, db *sto
 		bridge:      NewContextBridge(db, mem),
 		memory:      mem,
 		git:         gitMgr,
+		reviewer:    reviewer,
 		maxParallel: 5,
 		taskTimeout: 10 * time.Minute,
 	}
@@ -201,7 +204,19 @@ loop:
 		})
 	}
 
-	// 6. Update memory: auto-summarize output, extract decisions, log file changes
+	// 6. Run review pipeline
+	if s.reviewer != nil && t.Status == store.TaskDone && output != "" {
+		log.Printf("[scheduler] Running review for %s", t.ID)
+		result := s.reviewer.Run(context.Background(), t)
+		if result.Verdict == review.VerdictChanges {
+			log.Printf("[scheduler] Review for %s: changes requested (score: %d)", t.ID, result.Score)
+			// Note: task remains 'done' but with review feedback logged
+		} else {
+			log.Printf("[scheduler] Review for %s: %s (score: %d)", t.ID, result.Verdict, result.Score)
+		}
+	}
+
+	// 7. Update memory: auto-summarize output, extract decisions, log file changes
 	if output != "" || len(t.FilesChanged) > 0 {
 		s.memory.OnTaskComplete(context.Background(), t)
 	}
