@@ -1,49 +1,36 @@
 package orchestrator
 
 import (
-	"fmt"
-	"strings"
+	"context"
 
+	"github.com/tutuEic/macdp/internal/memory"
 	"github.com/tutuEic/macdp/internal/store"
 )
 
+// ContextBridge builds task context using the memory manager.
+// Replaces the old raw-dump approach with tiered memory retrieval.
 type ContextBridge struct {
-	store *store.DB
+	store  *store.DB
+	memory *memory.Manager
 }
 
-func NewContextBridge(db *store.DB) *ContextBridge {
-	return &ContextBridge{store: db}
+// NewContextBridge creates a context bridge backed by the memory manager.
+func NewContextBridge(db *store.DB, mem *memory.Manager) *ContextBridge {
+	return &ContextBridge{store: db, memory: mem}
 }
 
-func (cb *ContextBridge) BuildContext(task *store.Task) string {
-	var ctx strings.Builder
-
+// BuildContext assembles context for a task using the memory manager's tiered retrieval.
+func (cb *ContextBridge) BuildContext(ctx context.Context, task *store.Task) string {
+	// Load dependency tasks
+	var deps []*store.Task
 	for _, depID := range task.DependsOn {
 		dep, err := cb.store.GetTask(depID)
 		if err != nil {
 			continue
 		}
-		ctx.WriteString(fmt.Sprintf("## Completed: %s\n", dep.Title))
-		if dep.Output != "" {
-			output := dep.Output
-			if len(output) > 3000 {
-				output = output[:3000] + "\n...(truncated)"
-			}
-			ctx.WriteString(output)
-		}
-		if len(dep.FilesChanged) > 0 {
-			ctx.WriteString("\nChanged files:\n")
-			for _, f := range dep.FilesChanged {
-				ctx.WriteString(fmt.Sprintf("- %s\n", f))
-			}
-		}
-		ctx.WriteString("\n\n")
+		deps = append(deps, dep)
 	}
 
-	if task.Module != "" {
-		ctx.WriteString(fmt.Sprintf("## Your module: %s\n", task.Module))
-		ctx.WriteString(fmt.Sprintf("Branch: %s\n\n", task.Branch))
-	}
-
-	return ctx.String()
+	// Use memory manager to build context with token budget
+	return cb.memory.BuildContext(ctx, task, deps)
 }

@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+func (s TaskStatus) String() string {
+	return string(s)
+}
+
 // Project represents a development project.
 type Project struct {
 	ID          string    `json:"id"`

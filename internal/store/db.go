@@ -43,6 +43,11 @@ func (db *DB) Close() error {
 	return db.conn.Close()
 }
 
+// Conn returns the underlying database connection for use by other packages.
+func (db *DB) Conn() *sql.DB {
+	return db.conn
+}
+
 func (db *DB) migrate() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS projects (

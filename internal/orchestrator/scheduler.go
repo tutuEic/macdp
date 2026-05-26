@@ -9,6 +9,7 @@ import (
 
 	"github.com/tutuEic/macdp/internal/agent"
 	"github.com/tutuEic/macdp/internal/event"
+	"github.com/tutuEic/macdp/internal/memory"
 	"github.com/tutuEic/macdp/internal/store"
 )
 
@@ -19,18 +20,20 @@ type Scheduler struct {
 	bus         *event.EventBus
 	store       *store.DB
 	bridge      *ContextBridge
+	memory      *memory.Manager
 	maxParallel int
 	taskTimeout time.Duration
 }
 
 // NewScheduler creates a new scheduler.
-func NewScheduler(dag *DAG, agents *agent.Registry, bus *event.EventBus, db *store.DB) *Scheduler {
+func NewScheduler(dag *DAG, agents *agent.Registry, bus *event.EventBus, db *store.DB, mem *memory.Manager) *Scheduler {
 	return &Scheduler{
 		dag:         dag,
 		agents:      agents,
 		bus:         bus,
 		store:       db,
-		bridge:      NewContextBridge(db),
+		bridge:      NewContextBridge(db, mem),
+		memory:      mem,
 		maxParallel: 5,
 		taskTimeout: 10 * time.Minute,
 	}
@@ -64,16 +67,15 @@ func (s *Scheduler) RunLayers(ctx context.Context) error {
 
 				s.executeTask(ctx, task)
 
+				mu.Lock()
 				if task.Status == store.TaskFailed {
-					mu.Lock()
 					failedTasks = append(failedTasks, task.ID)
-					mu.Unlock()
 				}
+				mu.Unlock()
 			}(t)
 		}
 		wg.Wait()
 
-		// Log failures for this layer
 		if len(failedTasks) > 0 {
 			log.Printf("[scheduler] Layer %d: %d tasks failed: %v", i+1, len(failedTasks), failedTasks)
 		}
@@ -100,8 +102,8 @@ func (s *Scheduler) executeTask(ctx context.Context, t *store.Task) {
 		return
 	}
 
-	// 2. Build context from dependencies
-	taskContext := s.bridge.BuildContext(t)
+	// 2. Build context using memory manager (tiered + token-budgeted)
+	taskContext := s.bridge.BuildContext(taskCtx, t)
 
 	// 3. Update status
 	t.Status = store.TaskRunning
@@ -161,6 +163,8 @@ loop:
 				break loop
 			case "error":
 				s.markFailed(t, ev.Content)
+				// Still save memory for failed tasks
+				s.memory.OnTaskComplete(context.Background(), t)
 				break loop
 			}
 		case <-taskCtx.Done():
@@ -177,6 +181,11 @@ loop:
 		s.bus.Emit(event.TaskCompleted, "scheduler", map[string]string{
 			"task_id": t.ID, "agent": agentName,
 		})
+	}
+
+	// 6. Update memory: auto-summarize output, extract decisions, log file changes
+	if output != "" || len(t.FilesChanged) > 0 {
+		s.memory.OnTaskComplete(context.Background(), t)
 	}
 }
 

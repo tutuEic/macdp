@@ -16,6 +16,7 @@ import (
 	"github.com/tutuEic/macdp/internal/agent"
 	"github.com/tutuEic/macdp/internal/event"
 	"github.com/tutuEic/macdp/internal/llm"
+	"github.com/tutuEic/macdp/internal/memory"
 	"github.com/tutuEic/macdp/internal/orchestrator"
 	"github.com/tutuEic/macdp/internal/planner"
 	"github.com/tutuEic/macdp/internal/review"
@@ -31,16 +32,18 @@ type Server struct {
 	planner  *planner.Planner
 	reviewer *review.Pipeline
 	llm      *llm.Client
+	memory   *memory.Manager
 }
 
 // NewServer creates a new API server.
-func NewServer(db *store.DB, agents *agent.Registry, bus *event.EventBus, llmClient *llm.Client) *Server {
+func NewServer(db *store.DB, agents *agent.Registry, bus *event.EventBus, llmClient *llm.Client, memMgr *memory.Manager) *Server {
 	s := &Server{
 		store:    db,
 		agents:   agents,
 		bus:      bus,
 		wsHub:    NewWSHub(),
 		llm:      llmClient,
+		memory:   memMgr,
 		planner:  planner.New(llmClient),
 		reviewer: review.NewPipeline(llmClient, agents, bus),
 	}
@@ -459,7 +462,7 @@ func (s *Server) executeProject(c *gin.Context) {
 
 	// Start execution in background
 	go func() {
-		scheduler := orchestrator.NewScheduler(dag, s.agents, s.bus, s.store)
+		scheduler := orchestrator.NewScheduler(dag, s.agents, s.bus, s.store, s.memory)
 		if err := scheduler.RunLayers(context.Background()); err != nil {
 			log.Printf("[execute] Scheduler error: %v", err)
 		}
