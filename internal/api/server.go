@@ -1,17 +1,22 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"log"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/tutuEic/macdp/internal/agent"
 	"github.com/tutuEic/macdp/internal/event"
+	"github.com/tutuEic/macdp/internal/llm"
+	"github.com/tutuEic/macdp/internal/orchestrator"
+	"github.com/tutuEic/macdp/internal/planner"
+	"github.com/tutuEic/macdp/internal/review"
 	"github.com/tutuEic/macdp/internal/store"
-	"time"
-	"fmt"
 )
 
 // Server is the HTTP + WebSocket API server.
@@ -20,15 +25,21 @@ type Server struct {
 	agents   *agent.Registry
 	bus      *event.EventBus
 	wsHub    *WSHub
+	planner  *planner.Planner
+	reviewer *review.Pipeline
+	llm      *llm.Client
 }
 
 // NewServer creates a new API server.
-func NewServer(db *store.DB, agents *agent.Registry, bus *event.EventBus) *Server {
+func NewServer(db *store.DB, agents *agent.Registry, bus *event.EventBus, llmClient *llm.Client) *Server {
 	s := &Server{
-		store:  db,
-		agents: agents,
-		bus:    bus,
-		wsHub:  NewWSHub(),
+		store:    db,
+		agents:   agents,
+		bus:      bus,
+		wsHub:    NewWSHub(),
+		llm:      llmClient,
+		planner:  planner.New(llmClient),
+		reviewer: review.NewPipeline(llmClient, agents, bus),
 	}
 	// Wire EventBus to WebSocket
 	bus.SetWSCallback(func(e *event.Event) {
@@ -80,6 +91,12 @@ func (s *Server) Handler() *gin.Engine {
 
 		// Events
 		api.GET("/events", s.getEvents)
+
+		// Planner
+		api.POST("/projects/:id/plan", s.planProject)
+
+		// Scheduler
+		api.POST("/projects/:id/execute", s.executeProject)
 	}
 
 	// WebSocket
@@ -347,6 +364,71 @@ func (h *WSHub) Broadcast(data any) {
 			delete(h.conns, conn)
 		}
 	}
+}
+
+// --- Planner & Scheduler handlers ---
+
+func (s *Server) planProject(c *gin.Context) {
+	projectID := c.Param("id")
+	var body struct {
+		Requirement string `json:"requirement"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Build project context
+	var projectCtx string
+	project, err := s.store.GetProject(projectID)
+	if err == nil {
+		projectCtx = fmt.Sprintf("Project: %s\n%s\nPath: %s", project.Name, project.Description, project.RepoPath)
+	}
+
+	// Plan
+	plan, err := s.planner.Plan(context.Background(), body.Requirement, projectCtx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Save tasks to DB
+	tasks := planner.PlanToTasks(plan, projectID)
+	for _, t := range tasks {
+		s.store.CreateTask(t)
+	}
+
+	s.bus.Emit(event.PlanCreated, "planner", plan)
+	c.JSON(http.StatusOK, plan)
+}
+
+func (s *Server) executeProject(c *gin.Context) {
+	projectID := c.Param("id")
+
+	// Load tasks
+	tasks, err := s.store.ListTasks(projectID)
+	if err != nil || len(tasks) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no tasks found"})
+		return
+	}
+
+	// Build DAG
+	dag, err := orchestrator.NewDAG(tasks)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("DAG error: %v", err)})
+		return
+	}
+
+	// Start execution in background
+	go func() {
+		scheduler := orchestrator.NewScheduler(dag, s.agents, s.bus, s.store)
+		if err := scheduler.RunLayers(context.Background()); err != nil {
+			log.Printf("[execute] Scheduler error: %v", err)
+		}
+		log.Printf("[execute] All tasks completed for project %s", projectID)
+	}()
+
+	c.JSON(http.StatusOK, gin.H{"status": "execution_started", "tasks": len(tasks)})
 }
 
 func genID() string {
