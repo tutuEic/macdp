@@ -3,184 +3,134 @@ package agent
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"os/exec"
-	"strings"
-	"sync"
 	"time"
 )
 
-// ClaudeCodeAdapter implements AgentAdapter for Anthropic's Claude Code CLI.
-type ClaudeCodeAdapter struct {
-	config Config
-	mu     sync.Mutex
-	status Status
+type ClaudeCodeConnector struct {
+	binary string
+	status AgentStatus
 }
 
-// ClaudeResult represents the JSON output from claude -p --output-format json.
-type ClaudeResult struct {
-	Type        string  `json:"type"`
-	Subtype     string  `json:"subtype"`
-	Result      string  `json:"result"`
-	SessionID   string  `json:"session_id"`
-	NumTurns    int     `json:"num_turns"`
-	TotalCost   float64 `json:"total_cost_usd"`
-	DurationMs  int64   `json:"duration_ms"`
-	StopReason  string  `json:"stop_reason"`
-}
-
-func NewClaudeCodeAdapter(cfg Config) *ClaudeCodeAdapter {
-	return &ClaudeCodeAdapter{
-		config: cfg,
-		status: StatusIdle,
+func NewClaudeCodeConnector(binary string) *ClaudeCodeConnector {
+	if binary == "" {
+		binary = "claude"
+	}
+	return &ClaudeCodeConnector{
+		binary: binary,
+		status: AgentStatus{Online: false, State: "offline"},
 	}
 }
 
-func (c *ClaudeCodeAdapter) Name() string   { return "claude-code" }
-func (c *ClaudeCodeAdapter) Status() Status { return c.status }
+func (cc *ClaudeCodeConnector) Name() string     { return "claude-code" }
+func (cc *ClaudeCodeConnector) Type() AgentType   { return ClaudeCode }
+func (cc *ClaudeCodeConnector) Status() AgentStatus { return cc.status }
 
-func (c *ClaudeCodeAdapter) Capabilities() []string {
-	return []string{"code_gen", "shell", "file_io", "review", "subagents", "complex_refactoring"}
+func (cc *ClaudeCodeConnector) Connect(ctx context.Context, config map[string]string) error {
+	if b, ok := config["binary"]; ok {
+		cc.binary = b
+	}
+	cc.status.Online = true
+	cc.status.State = "idle"
+	return nil
 }
 
-func (c *ClaudeCodeAdapter) Execute(ctx context.Context, req *TaskRequest) (*TaskResponse, error) {
-	c.mu.Lock()
-	c.status = StatusBusy
-	c.mu.Unlock()
-	defer func() {
-		c.mu.Lock()
-		c.status = StatusIdle
-		c.mu.Unlock()
-	}()
-
-	start := time.Now()
-
-	// Build prompt
-	var ctxParts []string
-	ctxParts = append(ctxParts, fmt.Sprintf("Task: %s\n%s", req.Title, req.Description))
-	for k, v := range req.Context {
-		ctxParts = append(ctxParts, fmt.Sprintf("%s: %s", k, v))
-	}
-	prompt := strings.Join(ctxParts, "\n\n")
-
-	// Build command: claude -p "prompt" --output-format json
-	args := []string{"-p", prompt, "--output-format", "json"}
-	if req.MaxTurns > 0 {
-		args = append(args, "--max-turns", fmt.Sprintf("%d", req.MaxTurns))
-	} else {
-		args = append(args, "--max-turns", "15")
-	}
-	if len(req.AllowedTools) > 0 {
-		args = append(args, "--allowedTools", strings.Join(req.AllowedTools, ","))
-	}
-	args = append(args, c.config.Flags...)
-
-	cmd := exec.CommandContext(ctx, c.config.Entrypoint, args...)
-	cmd.Dir = req.Workdir
-
-	output, err := cmd.CombinedOutput()
-	duration := time.Since(start)
-
-	if err != nil {
-		c.status = StatusError
-		return &TaskResponse{
-			TaskID:    req.TaskID,
-			Success:   false,
-			Error:     err.Error(),
-			RawOutput: string(output),
-			Duration:  duration.String(),
-		}, nil
-	}
-
-	// Try to parse JSON result
-	var result ClaudeResult
-	if jsonErr := json.Unmarshal(output, &result); jsonErr == nil {
-		return &TaskResponse{
-			TaskID:       req.TaskID,
-			Success:      result.Subtype == "success",
-			Summary:      result.Result,
-			CostUSD:      result.TotalCost,
-			Duration:     duration.String(),
-			RawOutput:    string(output),
-			Error:        func() string { if result.Subtype != "success" { return result.Subtype }; return "" }(),
-		}, nil
-	}
-
-	// Fallback: treat raw output as summary
-	return &TaskResponse{
-		TaskID:    req.TaskID,
-		Success:   true,
-		Summary:   string(output),
-		Duration:  duration.String(),
-		RawOutput: string(output),
-	}, nil
+func (cc *ClaudeCodeConnector) Disconnect() error {
+	cc.status.Online = false
+	cc.status.State = "offline"
+	return nil
 }
 
-func (c *ClaudeCodeAdapter) ExecuteAsync(ctx context.Context, req *TaskRequest) (<-chan *Event, error) {
-	events := make(chan *Event, 100)
+func (cc *ClaudeCodeConnector) Ping(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, cc.binary, "--version")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("claude-code not available: %w", err)
+	}
+	cc.status.LastPing = time.Now()
+	return nil
+}
+
+func (cc *ClaudeCodeConnector) ExecuteTask(ctx context.Context, req *TaskRequest) (<-chan *TaskEvent, error) {
+	cc.status.State = "busy"
+	cc.status.CurrentTask = req.TaskID
+	events := make(chan *TaskEvent, 100)
 
 	go func() {
-		defer close(events)
-
-		c.mu.Lock()
-		c.status = StatusBusy
-		c.mu.Unlock()
 		defer func() {
-			c.mu.Lock()
-			c.status = StatusIdle
-			c.mu.Unlock()
+			cc.status.State = "idle"
+			cc.status.CurrentTask = ""
+			close(events)
 		}()
 
-		var ctxParts []string
-		ctxParts = append(ctxParts, fmt.Sprintf("Task: %s\n%s", req.Title, req.Description))
-		for k, v := range req.Context {
-			ctxParts = append(ctxParts, fmt.Sprintf("%s: %s", k, v))
+		start := time.Now()
+		prompt := fmt.Sprintf("Task: %s\n%s", req.Title, req.Description)
+		if req.Context != "" {
+			prompt += "\n\nContext:\n" + req.Context
 		}
-		prompt := strings.Join(ctxParts, "\n\n")
 
-		args := []string{"-p", prompt, "--output-format", "json", "--max-turns", "15"}
-		args = append(args, c.config.Flags...)
+		args := []string{"-p", prompt, "--output-format", "stream-json", "--verbose"}
+		if req.MaxTurns > 0 {
+			args = append(args, "--max-turns", fmt.Sprintf("%d", req.MaxTurns))
+		} else {
+			args = append(args, "--max-turns", "15")
+		}
 
-		cmd := exec.CommandContext(ctx, c.config.Entrypoint, args...)
-		cmd.Dir = req.Workdir
+		taskCtx, cancel := context.WithCancel(ctx)
+		_ = cancel
+
+		cmd := exec.CommandContext(taskCtx, cc.binary, args...)
+		if req.Workdir != "" {
+			cmd.Dir = req.Workdir
+		}
 
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
 		if err := cmd.Start(); err != nil {
-			events <- &Event{Type: EventError, Agent: "claude-code", TaskID: req.TaskID, Content: err.Error(), Timestamp: time.Now()}
+			events <- &TaskEvent{Type: "error", TaskID: req.TaskID, Agent: "claude-code", Content: err.Error()}
 			return
 		}
 
 		go func() {
 			scanner := bufio.NewScanner(stdout)
 			for scanner.Scan() {
-				line := scanner.Text()
-				events <- &Event{Type: EventStdout, Agent: "claude-code", TaskID: req.TaskID, Content: line, Timestamp: time.Now()}
+				events <- &TaskEvent{Type: "output", TaskID: req.TaskID, Agent: "claude-code", Content: scanner.Text()}
 			}
 		}()
-
 		go func() {
 			scanner := bufio.NewScanner(stderr)
 			for scanner.Scan() {
-				events <- &Event{Type: EventStderr, Agent: "claude-code", TaskID: req.TaskID, Content: scanner.Text(), Timestamp: time.Now()}
+				events <- &TaskEvent{Type: "output", TaskID: req.TaskID, Agent: "claude-code", Content: "[err] " + scanner.Text()}
 			}
 		}()
 
 		err := cmd.Wait()
 		if err != nil {
-			events <- &Event{Type: EventError, Agent: "claude-code", TaskID: req.TaskID, Content: err.Error(), Timestamp: time.Now()}
+			events <- &TaskEvent{Type: "error", TaskID: req.TaskID, Agent: "claude-code", Content: err.Error()}
 		} else {
-			events <- &Event{Type: EventResult, Agent: "claude-code", TaskID: req.TaskID, Content: "completed", Timestamp: time.Now()}
+			events <- &TaskEvent{Type: "complete", TaskID: req.TaskID, Agent: "claude-code", Content: fmt.Sprintf("completed in %s", time.Since(start)), Progress: 100}
 		}
 	}()
 
 	return events, nil
 }
 
-func (c *ClaudeCodeAdapter) Cancel(taskID string) error {
-	return nil
+func (cc *ClaudeCodeConnector) CancelTask(taskID string) error { return nil }
+
+func (cc *ClaudeCodeConnector) SendMessage(ctx context.Context, msg string) (<-chan *ChatMessage, error) {
+	ch := make(chan *ChatMessage, 100)
+	go func() {
+		defer close(ch)
+		cmd := exec.CommandContext(ctx, cc.binary, "-p", msg, "--output-format", "text", "--max-turns", "3")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			ch <- &ChatMessage{Role: "system", Content: fmt.Sprintf("Error: %v", err)}
+			return
+		}
+		ch <- &ChatMessage{Role: "agent", Content: string(output)}
+	}()
+	return ch, nil
 }
 
-var _ AgentAdapter = (*ClaudeCodeAdapter)(nil)
+var _ AgentConnector = (*ClaudeCodeConnector)(nil)

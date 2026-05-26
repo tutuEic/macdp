@@ -10,120 +10,102 @@ import (
 	"time"
 )
 
-// HermesAdapter implements AgentAdapter for the Hermes Agent CLI.
-type HermesAdapter struct {
-	config Config
-	mu     sync.Mutex
-	status Status
+// HermesConnector connects to Hermes Agent via CLI.
+type HermesConnector struct {
+	binary   string
+	mu       sync.Mutex
+	status   AgentStatus
+	cancelFn context.CancelFunc
 }
 
-// NewHermesAdapter creates a new Hermes agent adapter.
-func NewHermesAdapter(cfg Config) *HermesAdapter {
-	return &HermesAdapter{
-		config: cfg,
-		status: StatusIdle,
+// NewHermesConnector creates a Hermes connector.
+func NewHermesConnector(binary string) *HermesConnector {
+	if binary == "" {
+		binary = "hermes"
+	}
+	return &HermesConnector{
+		binary: binary,
+		status: AgentStatus{Online: false, State: "offline"},
 	}
 }
 
-func (h *HermesAdapter) Name() string   { return "hermes" }
-func (h *HermesAdapter) Status() Status { return h.status }
+func (h *HermesConnector) Name() string     { return "hermes" }
+func (h *HermesConnector) Type() AgentType   { return Hermes }
+func (h *HermesConnector) Status() AgentStatus { return h.status }
 
-func (h *HermesAdapter) Capabilities() []string {
-	return []string{"shell", "file_io", "web", "delegation", "testing", "debugging"}
+func (h *HermesConnector) Connect(ctx context.Context, config map[string]string) error {
+	if b, ok := config["binary"]; ok {
+		h.binary = b
+	}
+	if err := h.Ping(ctx); err != nil {
+		return fmt.Errorf("hermes not available: %w", err)
+	}
+	h.status.Online = true
+	h.status.State = "idle"
+	h.status.LastPing = time.Now()
+	return nil
 }
 
-func (h *HermesAdapter) Execute(ctx context.Context, req *TaskRequest) (*TaskResponse, error) {
-	h.mu.Lock()
-	h.status = StatusBusy
-	h.mu.Unlock()
-	defer func() {
-		h.mu.Lock()
-		h.status = StatusIdle
-		h.mu.Unlock()
-	}()
+func (h *HermesConnector) Disconnect() error {
+	h.status.Online = false
+	h.status.State = "offline"
+	return nil
+}
 
-	start := time.Now()
-
-	// Build context string
-	var ctxParts []string
-	ctxParts = append(ctxParts, fmt.Sprintf("Task: %s\n%s", req.Title, req.Description))
-	for k, v := range req.Context {
-		ctxParts = append(ctxParts, fmt.Sprintf("%s: %s", k, v))
-	}
-	prompt := strings.Join(ctxParts, "\n\n")
-
-	// Build command: hermes chat -q "prompt"
-	args := []string{"chat", "-q", prompt}
-	args = append(args, h.config.Flags...)
-
-	if req.MaxTurns > 0 {
-		args = append(args, "--max-turns", fmt.Sprintf("%d", req.MaxTurns))
-	}
-
-	cmd := exec.CommandContext(ctx, h.config.Entrypoint, args...)
-	cmd.Dir = req.Workdir
-
+func (h *HermesConnector) Ping(ctx context.Context) error {
+	cmd := exec.CommandContext(ctx, h.binary, "chat", "-q", "ping", "--quiet")
+	cmd.Env = append(cmd.Environ(), "HERMES_NO_BANNER=1")
 	output, err := cmd.CombinedOutput()
-	duration := time.Since(start)
-
 	if err != nil {
-		h.status = StatusError
-		return &TaskResponse{
-			TaskID:    req.TaskID,
-			Success:   false,
-			Error:     err.Error(),
-			RawOutput: string(output),
-			Duration:  duration.String(),
-		}, nil
+		return fmt.Errorf("hermes ping failed: %s: %w", string(output), err)
 	}
-
-	return &TaskResponse{
-		TaskID:    req.TaskID,
-		Success:   true,
-		Summary:   string(output),
-		RawOutput: string(output),
-		Duration:  duration.String(),
-	}, nil
+	h.status.LastPing = time.Now()
+	return nil
 }
 
-func (h *HermesAdapter) ExecuteAsync(ctx context.Context, req *TaskRequest) (<-chan *Event, error) {
-	events := make(chan *Event, 100)
+func (h *HermesConnector) ExecuteTask(ctx context.Context, req *TaskRequest) (<-chan *TaskEvent, error) {
+	h.mu.Lock()
+	h.status.State = "busy"
+	h.status.CurrentTask = req.TaskID
+	h.mu.Unlock()
+
+	events := make(chan *TaskEvent, 100)
 
 	go func() {
-		defer close(events)
-
-		h.mu.Lock()
-		h.status = StatusBusy
-		h.mu.Unlock()
 		defer func() {
 			h.mu.Lock()
-			h.status = StatusIdle
+			h.status.State = "idle"
+			h.status.CurrentTask = ""
 			h.mu.Unlock()
+			close(events)
 		}()
 
 		start := time.Now()
 
-		var ctxParts []string
-		ctxParts = append(ctxParts, fmt.Sprintf("Task: %s\n%s", req.Title, req.Description))
-		for k, v := range req.Context {
-			ctxParts = append(ctxParts, fmt.Sprintf("%s: %s", k, v))
+		// Build prompt
+		prompt := fmt.Sprintf("Task: %s\n%s", req.Title, req.Description)
+		if req.Context != "" {
+			prompt += "\n\nContext:\n" + req.Context
 		}
-		prompt := strings.Join(ctxParts, "\n\n")
 
-		args := []string{"chat", "-q", prompt}
-		args = append(args, h.config.Flags...)
+		args := []string{"chat", "-q", prompt, "--quiet"}
 		if req.MaxTurns > 0 {
 			args = append(args, "--max-turns", fmt.Sprintf("%d", req.MaxTurns))
 		}
 
-		cmd := exec.CommandContext(ctx, h.config.Entrypoint, args...)
-		cmd.Dir = req.Workdir
+		taskCtx, cancel := context.WithCancel(ctx)
+		h.cancelFn = cancel
+
+		cmd := exec.CommandContext(taskCtx, h.binary, args...)
+		if req.Workdir != "" {
+			cmd.Dir = req.Workdir
+		}
 
 		stdout, _ := cmd.StdoutPipe()
 		stderr, _ := cmd.StderrPipe()
 
 		if err := cmd.Start(); err != nil {
-			events <- &Event{Type: EventError, Agent: "hermes", TaskID: req.TaskID, Content: err.Error(), Timestamp: time.Now()}
+			events <- &TaskEvent{Type: "error", TaskID: req.TaskID, Agent: "hermes", Content: err.Error()}
 			return
 		}
 
@@ -131,7 +113,8 @@ func (h *HermesAdapter) ExecuteAsync(ctx context.Context, req *TaskRequest) (<-c
 		go func() {
 			scanner := bufio.NewScanner(stdout)
 			for scanner.Scan() {
-				events <- &Event{Type: EventStdout, Agent: "hermes", TaskID: req.TaskID, Content: scanner.Text(), Timestamp: time.Now()}
+				line := scanner.Text()
+				events <- &TaskEvent{Type: "output", TaskID: req.TaskID, Agent: "hermes", Content: line}
 			}
 		}()
 
@@ -139,7 +122,7 @@ func (h *HermesAdapter) ExecuteAsync(ctx context.Context, req *TaskRequest) (<-c
 		go func() {
 			scanner := bufio.NewScanner(stderr)
 			for scanner.Scan() {
-				events <- &Event{Type: EventStderr, Agent: "hermes", TaskID: req.TaskID, Content: scanner.Text(), Timestamp: time.Now()}
+				events <- &TaskEvent{Type: "output", TaskID: req.TaskID, Agent: "hermes", Content: "[err] " + scanner.Text()}
 			}
 		}()
 
@@ -147,19 +130,36 @@ func (h *HermesAdapter) ExecuteAsync(ctx context.Context, req *TaskRequest) (<-c
 		duration := time.Since(start)
 
 		if err != nil {
-			events <- &Event{Type: EventError, Agent: "hermes", TaskID: req.TaskID, Content: err.Error(), Timestamp: time.Now()}
+			events <- &TaskEvent{Type: "error", TaskID: req.TaskID, Agent: "hermes", Content: fmt.Sprintf("failed after %s: %v", duration, err)}
 		} else {
-			events <- &Event{Type: EventResult, Agent: "hermes", TaskID: req.TaskID, Content: fmt.Sprintf("Completed in %s", duration), Timestamp: time.Now()}
+			events <- &TaskEvent{Type: "complete", TaskID: req.TaskID, Agent: "hermes", Content: fmt.Sprintf("completed in %s", duration), Progress: 100}
 		}
 	}()
 
 	return events, nil
 }
 
-func (h *HermesAdapter) Cancel(taskID string) error {
-	// Kill the hermes process — handled by context cancellation in Execute
+func (h *HermesConnector) CancelTask(taskID string) error {
+	if h.cancelFn != nil {
+		h.cancelFn()
+	}
 	return nil
 }
 
+func (h *HermesConnector) SendMessage(ctx context.Context, msg string) (<-chan *ChatMessage, error) {
+	ch := make(chan *ChatMessage, 100)
+	go func() {
+		defer close(ch)
+		cmd := exec.CommandContext(ctx, h.binary, "chat", "-q", msg, "--quiet")
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			ch <- &ChatMessage{Role: "system", Content: fmt.Sprintf("Error: %v", err)}
+			return
+		}
+		ch <- &ChatMessage{Role: "agent", Content: strings.TrimSpace(string(output))}
+	}()
+	return ch, nil
+}
+
 // compile-time check
-var _ AgentAdapter = (*HermesAdapter)(nil)
+var _ AgentConnector = (*HermesConnector)(nil)
