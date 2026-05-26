@@ -26,3 +26,4 @@ vendor/
 .macdp/
 web/node_modules/
 web/dist/
+macdp.db
