@@ -27,3 +27,5 @@ vendor/
 web/node_modules/
 web/dist/
 macdp.db
+*.db-shm
+*.db-wal
