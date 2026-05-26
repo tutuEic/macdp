@@ -1,0 +1,42 @@
+[
+  {
+    "id": "T1",
+    "title": "Create project structure and database schema",
+    "description": "Set up FastAPI project with SQLAlchemy models for users and todos tables. Include alembic migrations.",
+    "depends_on": [],
+    "agent": "hermes",
+    "max_turns": 10
+  },
+  {
+    "id": "T2",
+    "title": "Implement user registration API",
+    "description": "Create POST /auth/register endpoint with email/password validation, bcrypt hashing, and proper error handling.",
+    "depends_on": ["T1"],
+    "agent": "claude-code",
+    "max_turns": 15
+  },
+  {
+    "id": "T3",
+    "title": "Implement login API with JWT",
+    "description": "Create POST /auth/login endpoint that returns JWT access + refresh tokens.",
+    "depends_on": ["T1"],
+    "agent": "claude-code",
+    "max_turns": 15
+  },
+  {
+    "id": "T4",
+    "title": "Create React project with routing",
+    "description": "Initialize React app with React Router, set up layout, login/register/todo pages.",
+    "depends_on": [],
+    "agent": "codex",
+    "max_turns": 10
+  },
+  {
+    "id": "T5",
+    "title": "Build login/register frontend",
+    "description": "Create login and register forms with validation, connect to auth API.",
+    "depends_on": ["T2", "T3", "T4"],
+    "agent": "codex",
+    "max_turns": 10
+  }
+]
