@@ -263,6 +263,16 @@ func (m *Manager) Clean(projectID string) error {
 	return nil
 }
 
+// Find retrieves memory entries matching the given filters.
+func (m *Manager) Find(projectID, module, category string, limit int) ([]*Entry, error) {
+	return m.store.Find(Query{
+		ProjectID: projectID,
+		Module:    module,
+		Category:  category,
+		Limit:     limit,
+	})
+}
+
 func genMemID() string {
 	b := make([]byte, 6)
 	rand.Read(b)

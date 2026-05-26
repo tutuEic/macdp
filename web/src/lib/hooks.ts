@@ -1,9 +1,6 @@
-// React Query hooks for MACDP API
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import * as api from './api'
 import type { CreateProjectInput, CreateTaskInput, PlanInput, ChatInput } from './types'
-
-// ---- Projects ----
 
 export function useProjects() {
   return useQuery({ queryKey: ['projects'], queryFn: api.listProjects })
@@ -40,14 +37,12 @@ export function useExecuteProject() {
   })
 }
 
-// ---- Tasks ----
-
 export function useTasks(projectId: string) {
   return useQuery({
     queryKey: ['tasks', projectId],
     queryFn: () => api.listTasks(projectId),
     enabled: !!projectId,
-    refetchInterval: 3000, // poll every 3s for real-time feel
+    refetchInterval: 3000,
   })
 }
 
@@ -68,22 +63,14 @@ export function useUpdateTaskStatus() {
   })
 }
 
-// ---- Agents ----
-
 export function useAgents() {
-  return useQuery({
-    queryKey: ['agents'],
-    queryFn: api.listAgents,
-    refetchInterval: 5000,
-  })
+  return useQuery({ queryKey: ['agents'], queryFn: api.listAgents, refetchInterval: 5000 })
 }
 
 export function useAgentStatus(name: string) {
   return useQuery({
-    queryKey: ['agents', name],
-    queryFn: () => api.getAgentStatus(name),
-    enabled: !!name,
-    refetchInterval: 3000,
+    queryKey: ['agents', name], queryFn: () => api.getAgentStatus(name),
+    enabled: !!name, refetchInterval: 3000,
   })
 }
 
@@ -94,14 +81,11 @@ export function useSendAgentMessage() {
   })
 }
 
-// ---- Chat ----
-
 export function useChatHistory(projectId: string, agent?: string) {
   return useQuery({
     queryKey: ['chat', projectId, agent],
     queryFn: () => api.getChatHistory(projectId, agent),
-    enabled: !!projectId,
-    refetchInterval: 2000,
+    enabled: !!projectId, refetchInterval: 2000,
   })
 }
 
@@ -114,12 +98,26 @@ export function useSendChatMessage() {
   })
 }
 
-// ---- Events ----
-
 export function useEvents(type?: string) {
   return useQuery({
     queryKey: ['events', type],
     queryFn: () => api.getEvents(type),
     refetchInterval: 3000,
+  })
+}
+
+export function useMemoryStats(projectId: string) {
+  return useQuery({
+    queryKey: ['memory', projectId, 'stats'],
+    queryFn: () => api.getMemoryStats(projectId),
+    enabled: !!projectId, refetchInterval: 10000,
+  })
+}
+
+export function useMemoryEntries(projectId: string, module?: string, category?: string) {
+  return useQuery({
+    queryKey: ['memory', projectId, 'entries', module, category],
+    queryFn: () => api.getMemoryEntries(projectId, module, category),
+    enabled: !!projectId, refetchInterval: 5000,
   })
 }

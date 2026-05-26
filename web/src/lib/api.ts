@@ -116,6 +116,19 @@ export function getEvents(type?: string) {
   return request<TaskEvent[]>(`/events${params}`)
 }
 
+// ---- Memory ----
+
+export function getMemoryStats(projectId: string) {
+  return request<any>(`/projects/${projectId}/memory/stats`)
+}
+
+export function getMemoryEntries(projectId: string, module?: string, category?: string) {
+  const params = new URLSearchParams()
+  if (module) params.set('module', module)
+  if (category) params.set('category', category)
+  return request<any[]>(`/projects/${projectId}/memory/entries?${params}`)
+}
+
 // ---- Health ----
 
 export function healthCheck() {

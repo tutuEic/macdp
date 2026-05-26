@@ -103,6 +103,10 @@ func (s *Server) Handler() *gin.Engine {
 
 		// Scheduler
 		api.POST("/projects/:id/execute", s.executeProject)
+
+		// Memory
+		api.GET("/projects/:id/memory/stats", s.getMemoryStats)
+		api.GET("/projects/:id/memory/entries", s.getMemoryEntries)
 	}
 
 	// WebSocket
@@ -470,6 +474,30 @@ func (s *Server) executeProject(c *gin.Context) {
 	}()
 
 	c.JSON(http.StatusOK, gin.H{"status": "execution_started", "tasks": len(tasks)})
+}
+
+// --- Memory handlers ---
+
+func (s *Server) getMemoryStats(c *gin.Context) {
+	stats, err := s.memory.GetStats(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, stats)
+}
+
+func (s *Server) getMemoryEntries(c *gin.Context) {
+	module := c.Query("module")
+	category := c.Query("category")
+	limit := 20
+
+	entries, err := s.memory.Find(c.Param("id"), module, category, limit)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, entries)
 }
 
 // genID generates a unique ID using UUID v4.
