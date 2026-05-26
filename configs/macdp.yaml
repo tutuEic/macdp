@@ -1,7 +1,12 @@
-# MACDP - Multi-Agent Collaborative Development Platform
-# Default configuration
-
+# MACDP v2 配置
 orchestrator: hermes
+
+# LLM 配置 (用于 Task Planner 和审查)
+llm:
+  provider: deepseek
+  base_url: https://api.deepseek.com/v1
+  model: deepseek-chat          # DeepSeek V4 Pro
+  api_key_env: DEEPSEEK_API_KEY
 
 agents:
   - name: hermes
