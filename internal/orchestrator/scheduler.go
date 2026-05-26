@@ -9,6 +9,7 @@ import (
 
 	"github.com/tutuEic/macdp/internal/agent"
 	"github.com/tutuEic/macdp/internal/event"
+	"github.com/tutuEic/macdp/internal/git"
 	"github.com/tutuEic/macdp/internal/memory"
 	"github.com/tutuEic/macdp/internal/store"
 )
@@ -21,12 +22,13 @@ type Scheduler struct {
 	store       *store.DB
 	bridge      *ContextBridge
 	memory      *memory.Manager
+	git         *git.Manager
 	maxParallel int
 	taskTimeout time.Duration
 }
 
 // NewScheduler creates a new scheduler.
-func NewScheduler(dag *DAG, agents *agent.Registry, bus *event.EventBus, db *store.DB, mem *memory.Manager) *Scheduler {
+func NewScheduler(dag *DAG, agents *agent.Registry, bus *event.EventBus, db *store.DB, mem *memory.Manager, gitMgr *git.Manager) *Scheduler {
 	return &Scheduler{
 		dag:         dag,
 		agents:      agents,
@@ -34,6 +36,7 @@ func NewScheduler(dag *DAG, agents *agent.Registry, bus *event.EventBus, db *sto
 		store:       db,
 		bridge:      NewContextBridge(db, mem),
 		memory:      mem,
+		git:         gitMgr,
 		maxParallel: 5,
 		taskTimeout: 10 * time.Minute,
 	}
@@ -104,6 +107,21 @@ func (s *Scheduler) executeTask(ctx context.Context, t *store.Task) {
 
 	// 2. Build context using memory manager (tiered + token-budgeted)
 	taskContext := s.bridge.BuildContext(taskCtx, t)
+
+	// 2.5 Prepare git worktree for task isolation
+	if s.git != nil {
+		worktreePath, err := s.git.Prepare(taskCtx, t)
+		if err != nil {
+			log.Printf("[scheduler] Worktree prepare failed for %s: %v (continuing without isolation)", t.ID, err)
+		} else {
+			reqCtx := taskContext
+			if worktreePath != "" {
+				reqCtx += fmt.Sprintf("\n## Worktree\nYou are working in: %s\nBranch: %s\n\nMake all changes in this directory.", worktreePath, t.Branch)
+			}
+			taskContext = reqCtx
+			log.Printf("[scheduler] Task %s isolated in worktree: %s", t.ID, worktreePath)
+		}
+	}
 
 	// 3. Update status
 	t.Status = store.TaskRunning
@@ -186,6 +204,12 @@ loop:
 	// 6. Update memory: auto-summarize output, extract decisions, log file changes
 	if output != "" || len(t.FilesChanged) > 0 {
 		s.memory.OnTaskComplete(context.Background(), t)
+	}
+
+	// 7. Cleanup git worktree
+	if s.git != nil && t.Worktree != "" {
+		mergeBack := t.Status == store.TaskDone
+		s.git.Cleanup(context.Background(), t, mergeBack)
 	}
 }
 

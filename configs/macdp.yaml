@@ -9,7 +9,7 @@ storage:
 llm:
   base_url: "https://api.deepseek.com/v1"
   model: "deepseek-chat"
-  api_key: ""  # set via DEEPSEEK_API_KEY env
+  api_key_env: "DEEPSEEK_API_KEY"
 
 agents:
   - name: "hermes"

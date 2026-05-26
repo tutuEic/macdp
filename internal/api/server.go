@@ -462,7 +462,7 @@ func (s *Server) executeProject(c *gin.Context) {
 
 	// Start execution in background
 	go func() {
-		scheduler := orchestrator.NewScheduler(dag, s.agents, s.bus, s.store, s.memory)
+		scheduler := orchestrator.NewScheduler(dag, s.agents, s.bus, s.store, s.memory, nil)
 		if err := scheduler.RunLayers(context.Background()); err != nil {
 			log.Printf("[execute] Scheduler error: %v", err)
 		}
