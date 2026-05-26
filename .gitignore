@@ -24,3 +24,5 @@ vendor/
 
 # MACDP worktrees
 .macdp/
+web/node_modules/
+web/dist/
