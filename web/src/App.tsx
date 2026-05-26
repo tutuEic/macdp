@@ -1,14 +1,23 @@
+import { Suspense, lazy } from 'react'
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
 
-import Dashboard from './pages/Dashboard'
-import Projects from './pages/Projects'
-import Agents from './pages/Agents'
-import Kanban from './pages/Kanban'
-import Chat from './pages/Chat'
+// Lazy-load page components for code splitting
+const Dashboard = lazy(() => import('./pages/Dashboard'))
+const Projects = lazy(() => import('./pages/Projects'))
+const Agents = lazy(() => import('./pages/Agents'))
+const Kanban = lazy(() => import('./pages/Kanban'))
+const Chat = lazy(() => import('./pages/Chat'))
 import './App.css'
 
+function PageLoader() {
+  return (
+    <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '60vh' }}>
+      <div className="loading-spinner" />
+    </div>
+  )
+}
+
 function Sidebar() {
-  
   const navItems = [
     { path: '/', label: 'Dashboard', icon: '◈' },
     { path: '/projects', label: 'Projects', icon: '◇' },
@@ -58,13 +67,15 @@ function App() {
       <div className="app">
         <Sidebar />
         <main className="main-content">
-          <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/projects" element={<Projects />} />
-            <Route path="/agents" element={<Agents />} />
-            <Route path="/kanban" element={<Kanban />} />
-            <Route path="/chat" element={<Chat />} />
-          </Routes>
+          <Suspense fallback={<PageLoader />}>
+            <Routes>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/projects" element={<Projects />} />
+              <Route path="/agents" element={<Agents />} />
+              <Route path="/kanban" element={<Kanban />} />
+              <Route path="/chat" element={<Chat />} />
+            </Routes>
+          </Suspense>
         </main>
       </div>
     </BrowserRouter>

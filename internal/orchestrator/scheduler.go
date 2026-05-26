@@ -14,11 +14,11 @@ import (
 
 // Scheduler executes tasks on the DAG using available agents.
 type Scheduler struct {
-	dag        *DAG
-	agents     *agent.Registry
-	bus        *event.EventBus
-	store      *store.DB
-	bridge     *ContextBridge
+	dag         *DAG
+	agents      *agent.Registry
+	bus         *event.EventBus
+	store       *store.DB
+	bridge      *ContextBridge
 	maxParallel int
 	taskTimeout time.Duration
 }
@@ -36,46 +36,19 @@ func NewScheduler(dag *DAG, agents *agent.Registry, bus *event.EventBus, db *sto
 	}
 }
 
-// Run executes all tasks in the DAG respecting dependencies.
-func (s *Scheduler) Run(ctx context.Context) error {
-	sem := make(chan struct{}, s.maxParallel)
-	var wg sync.WaitGroup
-
-	for !s.dag.IsComplete() {
-		ready := s.dag.GetReady()
-		if len(ready) == 0 {
-			// All remaining tasks are running or blocked
-			time.Sleep(500 * time.Millisecond)
-			continue
-		}
-
-		for _, t := range ready {
-			wg.Add(1)
-			sem <- struct{}{} // acquire slot
-
-			go func(task *store.Task) {
-				defer wg.Done()
-				defer func() { <-sem }()
-
-				s.executeTask(ctx, task)
-			}(t)
-		}
-
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	wg.Wait()
-	return nil
-}
-
 // RunLayers executes tasks layer by layer, parallel within each layer.
+// Uses semaphore to cap concurrent goroutines per layer.
 func (s *Scheduler) RunLayers(ctx context.Context) error {
 	layers := s.dag.Layers()
 
 	for i, layer := range layers {
 		log.Printf("[scheduler] Executing layer %d/%d: %v", i+1, len(layers), layer)
 
+		sem := make(chan struct{}, s.maxParallel)
 		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var failedTasks []string
+
 		for _, taskID := range layer {
 			t := s.dag.GetTask(taskID)
 			if t == nil {
@@ -83,19 +56,26 @@ func (s *Scheduler) RunLayers(ctx context.Context) error {
 			}
 
 			wg.Add(1)
+			sem <- struct{}{} // acquire slot
+
 			go func(task *store.Task) {
 				defer wg.Done()
+				defer func() { <-sem }() // release slot
+
 				s.executeTask(ctx, task)
+
+				if task.Status == store.TaskFailed {
+					mu.Lock()
+					failedTasks = append(failedTasks, task.ID)
+					mu.Unlock()
+				}
 			}(t)
 		}
 		wg.Wait()
 
-		// Check for failures
-		for _, taskID := range layer {
-			t := s.dag.GetTask(taskID)
-			if t != nil && t.Status == store.TaskFailed {
-				log.Printf("[scheduler] Task %s failed, blocking dependents", taskID)
-			}
+		// Log failures for this layer
+		if len(failedTasks) > 0 {
+			log.Printf("[scheduler] Layer %d: %d tasks failed: %v", i+1, len(failedTasks), failedTasks)
 		}
 	}
 
@@ -103,6 +83,10 @@ func (s *Scheduler) RunLayers(ctx context.Context) error {
 }
 
 func (s *Scheduler) executeTask(ctx context.Context, t *store.Task) {
+	// Apply task-level timeout
+	taskCtx, cancel := context.WithTimeout(ctx, s.taskTimeout)
+	defer cancel()
+
 	// 1. Select agent
 	agentName := s.selectAgent(t)
 	if agentName == "" {
@@ -138,38 +122,50 @@ func (s *Scheduler) executeTask(ctx context.Context, t *store.Task) {
 		MaxTurns:    t.MaxTurns,
 	}
 
-	events, err := conn.ExecuteTask(ctx, req)
+	events, err := conn.ExecuteTask(taskCtx, req)
 	if err != nil {
 		s.markFailed(t, err.Error())
 		return
 	}
 
-	// 5. Process events
+	// 5. Process events (with timeout-awareness)
 	var output string
-	for ev := range events {
-		switch ev.Type {
-		case "output":
-			output += ev.Content + "\n"
-			s.bus.Emit(event.AgentOutput, agentName, ev)
-		case "progress":
-			t.Progress = ev.Progress
-			s.store.UpdateTaskProgress(t.ID, ev.Progress, output)
-			s.bus.Emit(event.TaskProgress, "scheduler", ev)
-		case "file_change":
-			t.FilesChanged = append(t.FilesChanged, ev.File)
-			s.bus.Emit(event.FileChanged, agentName, ev)
-		case "complete":
-			t.Status = store.TaskDone
-			t.Output = output
-			t.Progress = 100
-			s.store.UpdateTaskStatus(t.ID, store.TaskDone)
-			s.store.UpdateTaskProgress(t.ID, 100, output)
-			s.bus.Emit(event.TaskCompleted, "scheduler", map[string]string{
-				"task_id": t.ID, "agent": agentName, "title": t.Title,
-			})
-			log.Printf("[scheduler] ✓ Task %s completed by %s", t.ID, agentName)
-		case "error":
-			s.markFailed(t, ev.Content)
+loop:
+	for {
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				break loop
+			}
+			switch ev.Type {
+			case "output":
+				output += ev.Content + "\n"
+				s.bus.Emit(event.AgentOutput, agentName, ev)
+			case "progress":
+				t.Progress = ev.Progress
+				s.store.UpdateTaskProgress(t.ID, ev.Progress, output)
+				s.bus.Emit(event.TaskProgress, "scheduler", ev)
+			case "file_change":
+				t.FilesChanged = append(t.FilesChanged, ev.File)
+				s.bus.Emit(event.FileChanged, agentName, ev)
+			case "complete":
+				t.Status = store.TaskDone
+				t.Output = output
+				t.Progress = 100
+				s.store.UpdateTaskStatus(t.ID, store.TaskDone)
+				s.store.UpdateTaskProgress(t.ID, 100, output)
+				s.bus.Emit(event.TaskCompleted, "scheduler", map[string]string{
+					"task_id": t.ID, "agent": agentName, "title": t.Title,
+				})
+				log.Printf("[scheduler] ✓ Task %s completed by %s", t.ID, agentName)
+				break loop
+			case "error":
+				s.markFailed(t, ev.Content)
+				break loop
+			}
+		case <-taskCtx.Done():
+			s.markFailed(t, fmt.Sprintf("timeout after %v: %v", s.taskTimeout, taskCtx.Err()))
+			break loop
 		}
 	}
 

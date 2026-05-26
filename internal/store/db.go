@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"strings"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
@@ -13,12 +14,24 @@ type DB struct {
 	conn *sql.DB
 }
 
-// New opens (or creates) the SQLite database.
+// New opens (or creates) the SQLite database with performance tuning.
 func New(path string) (*DB, error) {
-	conn, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000")
+	// Use WAL mode with optimized settings for concurrent reads
+	conn, err := sql.Open("sqlite3", path+
+		"?_journal_mode=WAL"+
+		"&_busy_timeout=5000"+
+		"&_synchronous=NORMAL"+
+		"&_cache_size=-8000"+ // 8MB cache
+		"&_foreign_keys=ON")
 	if err != nil {
 		return nil, err
 	}
+
+	// Connection pool tuning: SQLite is single-writer, but WAL allows concurrent readers
+	conn.SetMaxOpenConns(1)          // single writer for SQLite
+	conn.SetMaxIdleConns(1)
+	conn.SetConnMaxLifetime(0)       // connections never expire
+
 	db := &DB{conn: conn}
 	if err := db.migrate(); err != nil {
 		return nil, err
@@ -65,6 +78,10 @@ func (db *DB) migrate() error {
 		FOREIGN KEY (project_id) REFERENCES projects(id)
 	);
 
+	CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id);
+	CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
+	CREATE INDEX IF NOT EXISTS idx_tasks_agent ON tasks(assigned_agent);
+
 	CREATE TABLE IF NOT EXISTS agents (
 		name TEXT PRIMARY KEY,
 		type TEXT NOT NULL,
@@ -84,6 +101,9 @@ func (db *DB) migrate() error {
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
 		FOREIGN KEY (project_id) REFERENCES projects(id)
 	);
+
+	CREATE INDEX IF NOT EXISTS idx_chat_project ON chat_messages(project_id);
+	CREATE INDEX IF NOT EXISTS idx_chat_agent ON chat_messages(agent_name);
 
 	CREATE TABLE IF NOT EXISTS plans (
 		id TEXT PRIMARY KEY,
@@ -139,13 +159,44 @@ func (db *DB) CreateTask(t *Task) error {
 	files, _ := json.Marshal(t.FilesChanged)
 	_, err := db.conn.Exec(
 		`INSERT INTO tasks (id, project_id, title, description, module, status, priority, 
-		assigned_agent, reviewer, depends_on, branch, worktree, progress, max_turns) 
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		assigned_agent, reviewer, depends_on, branch, worktree, progress, max_turns, files_changed) 
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		t.ID, t.ProjectID, t.Title, t.Description, t.Module, t.Status, t.Priority,
-		t.AssignedAgent, t.Reviewer, string(deps), t.Branch, t.Worktree, t.Progress, t.MaxTurns,
+		t.AssignedAgent, t.Reviewer, string(deps), t.Branch, t.Worktree, t.Progress, t.MaxTurns, string(files),
 	)
-	_ = files
 	return err
+}
+
+// CreateTasksBatch inserts multiple tasks in a single transaction.
+func (db *DB) CreateTasksBatch(tasks []*Task) error {
+	tx, err := db.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare(
+		`INSERT INTO tasks (id, project_id, title, description, module, status, priority, 
+		assigned_agent, reviewer, depends_on, branch, worktree, progress, max_turns, files_changed) 
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, t := range tasks {
+		deps, _ := json.Marshal(t.DependsOn)
+		files, _ := json.Marshal(t.FilesChanged)
+		_, err = stmt.Exec(
+			t.ID, t.ProjectID, t.Title, t.Description, t.Module, t.Status, t.Priority,
+			t.AssignedAgent, t.Reviewer, string(deps), t.Branch, t.Worktree, t.Progress, t.MaxTurns, string(files),
+		)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
 }
 
 func (db *DB) GetTask(id string) (*Task, error) {
@@ -268,16 +319,17 @@ func (db *DB) SaveMessage(m *ChatMessage) error {
 }
 
 func (db *DB) GetMessages(projectID, agentName string, limit int) ([]*ChatMessage, error) {
-	query := "SELECT id, project_id, task_id, agent_name, role, content, created_at FROM chat_messages WHERE project_id = ?"
+	var query strings.Builder
+	query.WriteString("SELECT id, project_id, task_id, agent_name, role, content, created_at FROM chat_messages WHERE project_id = ?")
 	args := []any{projectID}
 	if agentName != "" {
-		query += " AND agent_name = ?"
+		query.WriteString(" AND agent_name = ?")
 		args = append(args, agentName)
 	}
-	query += " ORDER BY created_at DESC LIMIT ?"
+	query.WriteString(" ORDER BY created_at DESC LIMIT ?")
 	args = append(args, limit)
 
-	rows, err := db.conn.Query(query, args...)
+	rows, err := db.conn.Query(query.String(), args...)
 	if err != nil {
 		return nil, err
 	}

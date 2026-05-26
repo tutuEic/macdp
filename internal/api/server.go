@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"net/http"
@@ -9,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/tutuEic/macdp/internal/agent"
 	"github.com/tutuEic/macdp/internal/event"
@@ -117,6 +120,7 @@ func (s *Server) createProject(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	p.ID = genID()
 	if err := s.store.CreateProject(&p); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -152,6 +156,9 @@ func (s *Server) createTask(c *gin.Context) {
 	}
 	t.ProjectID = c.Param("id")
 	t.Status = store.TaskPending
+	if t.ID == "" {
+		t.ID = genShortID()
+	}
 	if err := s.store.CreateTask(&t); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -245,13 +252,22 @@ func (s *Server) sendAgentMessage(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	ch, err := conn.SendMessage(c.Request.Context(), body.Message)
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+	defer cancel()
+
+	ch, err := conn.SendMessage(ctx, body.Message)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	msg := <-ch
-	c.JSON(http.StatusOK, msg)
+
+	select {
+	case msg := <-ch:
+		c.JSON(http.StatusOK, msg)
+	case <-ctx.Done():
+		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "agent response timeout"})
+	}
 }
 
 // --- Chat handlers ---
@@ -296,12 +312,23 @@ func (s *Server) sendChatMessage(c *gin.Context) {
 		return
 	}
 
-	ch, err := conn.SendMessage(c.Request.Context(), body.Content)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Minute)
+	defer cancel()
+
+	ch, err := conn.SendMessage(ctx, body.Content)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	resp := <-ch
+
+	var resp *agent.ChatMessage
+	select {
+	case r := <-ch:
+		resp = r
+	case <-ctx.Done():
+		c.JSON(http.StatusGatewayTimeout, gin.H{"error": "agent response timeout"})
+		return
+	}
 
 	// Save agent response
 	agentMsg := &store.ChatMessage{
@@ -357,12 +384,22 @@ func (h *WSHub) Add(conn *websocket.Conn) {
 
 func (h *WSHub) Broadcast(data any) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	deadConns := make([]*websocket.Conn, 0)
 	for conn := range h.conns {
 		if err := conn.WriteJSON(data); err != nil {
+			deadConns = append(deadConns, conn)
+		}
+	}
+	h.mu.RUnlock()
+
+	// Clean up dead connections outside the read lock
+	if len(deadConns) > 0 {
+		h.mu.Lock()
+		for _, conn := range deadConns {
 			conn.Close()
 			delete(h.conns, conn)
 		}
+		h.mu.Unlock()
 	}
 }
 
@@ -392,10 +429,11 @@ func (s *Server) planProject(c *gin.Context) {
 		return
 	}
 
-	// Save tasks to DB
+	// Save tasks to DB (batch insert)
 	tasks := planner.PlanToTasks(plan, projectID)
-	for _, t := range tasks {
-		s.store.CreateTask(t)
+	if err := s.store.CreateTasksBatch(tasks); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
 	s.bus.Emit(event.PlanCreated, "planner", plan)
@@ -431,6 +469,14 @@ func (s *Server) executeProject(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "execution_started", "tasks": len(tasks)})
 }
 
+// genID generates a unique ID using UUID v4.
 func genID() string {
-	return fmt.Sprintf("%d", time.Now().UnixNano())
+	return uuid.New().String()
+}
+
+// genShortID generates a shorter unique ID (8 hex chars from crypto/rand).
+func genShortID() string {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return hex.EncodeToString(b)
 }

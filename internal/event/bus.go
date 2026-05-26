@@ -40,12 +40,16 @@ const (
 	UserCommand = "user.command"
 )
 
+// maxHistory caps the number of events retained in the ring buffer.
+const maxHistory = 1000
+
 // EventBus is the central event distribution system.
 type EventBus struct {
 	mu          sync.RWMutex
 	subscribers map[string][]Handler
-	history     []*Event
-	maxHistory  int
+	ring        []*Event    // ring buffer for history
+	head        int         // write position
+	size        int         // current number of entries
 	wsCallback  func(*Event) // push to WebSocket
 }
 
@@ -53,7 +57,7 @@ type EventBus struct {
 func New() *EventBus {
 	return &EventBus{
 		subscribers: make(map[string][]Handler),
-		maxHistory:  1000,
+		ring:        make([]*Event, maxHistory),
 	}
 }
 
@@ -80,11 +84,12 @@ func (eb *EventBus) Emit(eventType string, source string, payload any) {
 		Timestamp: time.Now(),
 	}
 
-	// Store in history
+	// Store in ring buffer (lock only for the write)
 	eb.mu.Lock()
-	eb.history = append(eb.history, event)
-	if len(eb.history) > eb.maxHistory {
-		eb.history = eb.history[len(eb.history)-eb.maxHistory:]
+	eb.ring[eb.head] = event
+	eb.head = (eb.head + 1) % maxHistory
+	if eb.size < maxHistory {
+		eb.size++
 	}
 	wsCb := eb.wsCallback
 	eb.mu.Unlock()
@@ -104,15 +109,21 @@ func (eb *EventBus) Emit(eventType string, source string, payload any) {
 	}
 }
 
-// GetHistory returns recent events of a given type.
+// GetHistory returns recent events of a given type (newest first).
 func (eb *EventBus) GetHistory(eventType string, limit int) []*Event {
 	eb.mu.RLock()
 	defer eb.mu.RUnlock()
 
-	var result []*Event
-	for i := len(eb.history) - 1; i >= 0 && len(result) < limit; i-- {
-		if eventType == "" || eb.history[i].Type == eventType {
-			result = append(result, eb.history[i])
+	if limit > eb.size {
+		limit = eb.size
+	}
+
+	result := make([]*Event, 0, limit)
+	for i := 0; i < eb.size && len(result) < limit; i++ {
+		// Walk backwards from head-1 (newest)
+		idx := (eb.head - 1 - i + maxHistory) % maxHistory
+		if eventType == "" || eb.ring[idx].Type == eventType {
+			result = append(result, eb.ring[idx])
 		}
 	}
 	return result
