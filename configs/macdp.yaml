@@ -1,57 +1,36 @@
-# MACDP v2 配置
-orchestrator: hermes
+# MACDP Configuration
+server:
+  host: "0.0.0.0"
+  port: 8080
 
-# LLM 配置 (用于 Task Planner 和审查)
+storage:
+  path: "macdp.db"
+
 llm:
-  provider: deepseek
-  base_url: https://api.deepseek.com/v1
-  model: deepseek-chat          # DeepSeek V4 Pro
-  api_key_env: DEEPSEEK_API_KEY
+  base_url: "https://api.deepseek.com/v1"
+  model: "deepseek-chat"
+  api_key: ""  # set via DEEPSEEK_API_KEY env
 
 agents:
-  - name: hermes
+  - name: "hermes"
+    type: "hermes"
     enabled: true
-    role: orchestrator
-    entrypoint: hermes
-    max_concurrent: 3
-    strengths: [orchestration, testing, debugging, general_tasks]
+    config:
+      binary: "hermes"
 
-  - name: claude-code
-    enabled: true
-    role: worker
-    entrypoint: claude
-    flags: ["--output-format", "json"]
-    max_concurrent: 3
-    strengths: [complex_code, refactoring, review]
+  - name: "claude-code"
+    type: "claude-code"
+    enabled: false
+    config:
+      binary: "claude"
 
-  - name: codex
-    enabled: true
-    role: worker
-    entrypoint: codex
-    flags: ["--full-auto"]
-    max_concurrent: 5
-    strengths: [prototyping, single_file, scripts]
-
-scheduler:
-  max_parallel: 5
-  task_timeout_seconds: 600
-  max_retries: 2
+  - name: "codex"
+    type: "codex"
+    enabled: false
+    config:
+      binary: "codex"
 
 git:
   worktree_dir: ".macdp/worktrees"
   branch_prefix: "macdp/"
-  merge_strategy: squash
-
-review:
-  enabled: true
-  cross_review: true
-  max_review_rounds: 3
-  approval_required: false
-
-budget:
-  max_per_task_usd: 5.0
-  max_per_project_usd: 50.0
-
-api:
-  host: "0.0.0.0"
-  port: 8080
+  merge_strategy: "squash"
