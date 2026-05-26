@@ -7,6 +7,7 @@ const Projects = lazy(() => import('./pages/Projects'))
 const Agents = lazy(() => import('./pages/Agents'))
 const Kanban = lazy(() => import('./pages/Kanban'))
 const Chat = lazy(() => import('./pages/Chat'))
+const Memory = lazy(() => import('./pages/Memory'))
 import './App.css'
 
 function PageLoader() {
@@ -24,6 +25,7 @@ function Sidebar() {
     { path: '/agents', label: 'Agents', icon: '◉' },
     { path: '/kanban', label: 'Kanban', icon: '▤' },
     { path: '/chat', label: 'Chat', icon: '◎' },
+    { path: '/memory', label: 'Memory', icon: '◆' },
   ]
 
   return (
@@ -74,6 +76,7 @@ function App() {
               <Route path="/agents" element={<Agents />} />
               <Route path="/kanban" element={<Kanban />} />
               <Route path="/chat" element={<Chat />} />
+            <Route path="/memory" element={<Memory />} />
             </Routes>
           </Suspense>
         </main>
