@@ -1,14 +1,28 @@
 import { useState } from 'react'
-import { useProjects } from '../lib'
-
-// Memory panel component - shows memory stats and entries for a project
-// Uses the existing events and projects API since memory stats aren't exposed via REST yet
+import { useProjects, useMemoryStats } from '../lib'
 
 export default function MemoryPanel() {
   const { data: projects } = useProjects()
   const [selectedProject, setSelectedProject] = useState('')
+  const { data: stats, isLoading } = useMemoryStats(selectedProject)
 
   const project = projects?.find(p => p.id === selectedProject)
+
+  // Get real values from API or show defaults
+  const totalEntries = stats?.total_entries ?? 0
+  const totalTokens = stats?.total_tokens ?? 0
+  const workingCount = stats?.by_tier?.working ?? 0
+  const shortCount = stats?.by_tier?.short ?? 0
+  const longCount = stats?.by_tier?.long ?? 0
+  const summaryCount = stats?.by_category?.summary ?? 0
+  const decisionCount = stats?.by_category?.decision ?? 0
+  const conventionCount = stats?.by_category?.convention ?? 0
+
+  const tiers = [
+    { tier: 'Working', count: workingCount, desc: 'Dependency outputs + decisions', limit: '≤2K tokens', color: 'var(--success)' },
+    { tier: 'Short-term', count: shortCount, desc: 'Task summaries + file changes', limit: '≤3K tokens', color: 'var(--accent-gold)' },
+    { tier: 'Long-term', count: longCount, desc: 'Decisions + conventions + patterns', limit: 'unlimited', color: 'var(--info)' },
+  ]
 
   return (
     <div className="page">
@@ -20,7 +34,7 @@ export default function MemoryPanel() {
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '24px' }}>
-        {/* Project selector + stats */}
+        {/* Stats */}
         <div className="card" style={{ padding: '24px' }}>
           <h3 style={{ fontSize: 16, marginBottom: 16, fontWeight: 600 }}>Project Memory</h3>
 
@@ -39,22 +53,40 @@ export default function MemoryPanel() {
             ))}
           </select>
 
-          {project && (
+          {isLoading && (
+            <div style={{ display: 'flex', justifyContent: 'center', padding: 20 }}>
+              <div className="loading-spinner" />
+            </div>
+          )}
+
+          {project && !isLoading && (
             <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>
                 Project: <strong style={{ color: 'var(--text-primary)' }}>{project.name}</strong>
               </div>
 
-              {/* Memory tiers visual */}
+              {/* Topline stats */}
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8 }}>
+                <div className="card" style={{ padding: 12, textAlign: 'center', background: 'var(--bg-secondary)' }}>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--accent-gold)' }}>{totalEntries}</div>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Entries</div>
+                </div>
+                <div className="card" style={{ padding: 12, textAlign: 'center', background: 'var(--bg-secondary)' }}>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--info)' }}>{totalTokens}</div>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Total Tokens</div>
+                </div>
+                <div className="card" style={{ padding: 12, textAlign: 'center', background: 'var(--bg-secondary)' }}>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--success)' }}>{summaryCount}</div>
+                  <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>Summaries</div>
+                </div>
+              </div>
+
+              {/* Memory tiers */}
               <div style={{ marginTop: 8 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: 'var(--text-secondary)' }}>
                   Memory Tiers
                 </div>
-                {[
-                  { tier: 'Working', desc: 'Dependency outputs + decisions', limit: '≤2K tokens', color: 'var(--success)' },
-                  { tier: 'Short-term', desc: 'Task summaries + file changes', limit: '≤3K tokens', color: 'var(--accent-gold)' },
-                  { tier: 'Long-term', desc: 'Decisions + conventions + patterns', limit: 'unlimited', color: 'var(--info)' },
-                ].map(t => (
+                {tiers.map(t => (
                   <div key={t.tier} style={{
                     display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                     padding: '10px 14px', background: 'var(--bg-secondary)',
@@ -64,31 +96,31 @@ export default function MemoryPanel() {
                       <div style={{ fontSize: 13, fontWeight: 500, color: t.color }}>{t.tier}</div>
                       <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>{t.desc}</div>
                     </div>
-                    <span className="badge badge-idle" style={{ fontSize: 11 }}>{t.limit}</span>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 16, fontWeight: 700, color: t.color }}>{t.count}</div>
+                      <span className="badge badge-idle" style={{ fontSize: 10 }}>{t.limit}</span>
+                    </div>
                   </div>
                 ))}
               </div>
 
-              {/* Token budget */}
-              <div style={{ marginTop: 8 }}>
-                <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, color: 'var(--text-secondary)' }}>
-                  Token Budget (per agent call)
+              {/* Decision count */}
+              {decisionCount > 0 && (
+                <div style={{ fontSize: 12, color: 'var(--text-muted)', marginTop: 4 }}>
+                  📋 {decisionCount} architectural decisions · 📐 {conventionCount} conventions
                 </div>
-                <div className="progress-bar" style={{ height: 8 }}>
-                  <div className="progress-bar-fill" style={{ width: '25%', background: 'var(--success)' }} />
-                  <div className="progress-bar-fill" style={{ width: '38%', background: 'var(--accent-gold)', marginLeft: '25%', position: 'absolute' }} />
-                </div>
-                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, color: 'var(--text-muted)', marginTop: 4 }}>
-                  <span>Working: ~2000</span>
-                  <span>Retrieved: ~3000</span>
-                  <span>Max: 8000</span>
-                </div>
-              </div>
+              )}
+            </div>
+          )}
+
+          {!project && (
+            <div style={{ color: 'var(--text-muted)', padding: 20, textAlign: 'center', fontSize: 13 }}>
+              Select a project to view memory stats
             </div>
           )}
         </div>
 
-        {/* Memory techniques info */}
+        {/* Techniques */}
         <div className="card" style={{ padding: '24px' }}>
           <h3 style={{ fontSize: 16, marginBottom: 16, fontWeight: 600 }}>Token-saving Techniques</h3>
           <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
