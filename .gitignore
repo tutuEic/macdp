@@ -29,3 +29,5 @@ web/dist/
 macdp.db
 *.db-shm
 *.db-wal
+macdp.exe
+macdp
